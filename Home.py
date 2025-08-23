@@ -1,4 +1,4 @@
-import os, re, time, random
+import os, re, time, random, html
 import streamlit as st
 from openai import OpenAI
 from openai import AuthenticationError, RateLimitError, APIError
@@ -9,13 +9,17 @@ st.set_page_config(page_title="Nurse Next AI", page_icon="🩺", layout="wide")
 # ---------- Secrets / API key ----------
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    st.error("OPENAI_API_KEY not found. Add it in Streamlit Secrets (⋯ → Settings → Secrets) or as an environment variable.")
+    st.error(
+        "OPENAI_API_KEY not found. Add it in Streamlit Secrets (⋯ → Settings → Secrets) "
+        "or as an environment variable."
+    )
     st.stop()
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---------- Styles ----------
-st.markdown("""
+st.markdown(
+    """
 <style>
 /* Floating chat button (raised to avoid Streamlit Cloud controls) */
 #nurse-fab {
@@ -56,6 +60,7 @@ st.markdown("""
 .nurse-bubble {
   display: inline-block; padding: 10px 12px; border-radius: 12px;
   max-width: 95%;
+  word-wrap: break-word; white-space: pre-wrap;
 }
 .nurse-user .nurse-bubble   { background:#E6FFFA; color:#0F766E; }
 .nurse-bot  .nurse-bubble   { background:#F7F7F9; }
@@ -63,7 +68,9 @@ st.markdown("""
 .nurse-footer { padding: 10px; border-top: 1px solid #eee; background:#fff; }
 .nurse-note { font-size: 12px; color:#4b5563; margin-top:6px;}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # ---------- Guardrails ----------
 EMERGENCY_PATTERNS = [
@@ -110,10 +117,14 @@ SYSTEM_PROMPT = """You are an empathetic health information assistant.
 """
 
 # ---------- Header ----------
-col1, col2, col3 = st.columns([1,2,1])
+col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
     st.markdown("## 🩺 **Nurse Next AI**")
-    st.caption("This tool provides general educational health information only. It is NOT a substitute for professional medical advice. For emergencies, call your local emergency number.")
+    st.caption(
+        "This tool provides general educational health information only. "
+        "It is NOT a substitute for professional medical advice. For emergencies, "
+        "call your local emergency number."
+    )
 
 # ---------- Sidebar toggle ----------
 if "chat_open" not in st.session_state:
@@ -128,6 +139,10 @@ if "history" not in st.session_state:
         {"role": "assistant", "content": "Hi! I can share general health information. What can I help you with today?"}
     ]
 
+def _escape(s: str) -> str:
+    """Escape content to avoid HTML injection; keep newlines readable."""
+    return html.escape(s or "").replace("\n", "<br>")
+
 # ---------- Helper: call model with retry/backoff ----------
 def call_model(messages):
     max_attempts = 3
@@ -140,14 +155,16 @@ def call_model(messages):
             )
             return resp.choices[0].message.content
         except AuthenticationError:
-            return ("Your OpenAI API key seems invalid or missing. "
-                    "Open the menu (⋯ → Settings → Secrets) and set `OPENAI_API_KEY`, then rerun.")
+            return (
+                "Your OpenAI API key seems invalid or missing. "
+                "Open the menu (⋯ → Settings → Secrets) and set `OPENAI_API_KEY`, then rerun."
+            )
         except RateLimitError:
             if attempt < max_attempts - 1:
                 # exponential backoff + jitter
                 time.sleep((2 ** attempt) + random.uniform(0, 0.5))
                 continue
-            return ("The model is temporarily rate-limited. Please wait a moment and try again.")
+            return "The model is temporarily rate-limited. Please wait a moment and try again."
         except APIError as e:
             # transient 5xx -> one retry
             if attempt < max_attempts - 1:
@@ -167,18 +184,22 @@ with fab_col.container():
 if st.session_state.chat_open:
     with panel.container():
         st.markdown('<div id="nurse-panel">', unsafe_allow_html=True)
-        st.markdown('<div class="nurse-header"><div class="avatar">👩‍⚕️</div> Nurse Next</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="nurse-header"><div class="avatar">👩‍⚕️</div> Nurse Next</div>',
+            unsafe_allow_html=True,
+        )
         st.markdown('<div class="nurse-body">', unsafe_allow_html=True)
 
         # Render chat
         for m in st.session_state.history[-50:]:
             who = "nurse-user" if m["role"] == "user" else "nurse-bot"
+            safe = _escape(m["content"])
             st.markdown(
-                f'<div class="nurse-msg {who}"><div class="nurse-bubble">{m["content"]}</div></div>',
-                unsafe_allow_html=True
+                f'<div class="nurse-msg {who}"><div class="nurse-bubble">{safe}</div></div>',
+                unsafe_allow_html=True,
             )
 
-        st.markdown('</div>', unsafe_allow_html=True)  # close body
+        st.markdown("</div>", unsafe_allow_html=True)  # close body
         st.markdown('<div class="nurse-footer">', unsafe_allow_html=True)
 
         user_input = st.chat_input("Type your question…")
@@ -195,7 +216,7 @@ if st.session_state.chat_open:
             st.rerun()
 
         st.markdown('<div class="nurse-note">This chatbot is for general education only.</div>', unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)  # close footer & panel
+        st.markdown("</div></div>", unsafe_allow_html=True)  # close footer & panel
 else:
     # ensure any previously rendered panel is removed
     panel.empty()
