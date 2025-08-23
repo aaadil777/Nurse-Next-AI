@@ -1,6 +1,7 @@
 import os, re
 import streamlit as st
 from openai import OpenAI
+from openai import AuthenticationError, RateLimitError, APIError
 
 # ---------- Page setup ----------
 st.set_page_config(page_title="Nurse Next AI (Educational)", page_icon="🩺", layout="wide")
@@ -10,42 +11,43 @@ OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
 if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY not found. Add it in Streamlit Secrets (⋯ → Settings → Secrets).")
     st.stop()
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ---------- Styles: floating chat button + panel ----------
+# ---------- Styles ----------
 st.markdown("""
 <style>
 /* Floating chat button */
 #nurse-fab {
   position: fixed;
-  right: 22px; bottom: 22px;
-  width: 64px; height: 64px;
+  right: 20px; bottom: 20px;
+  width: 56px; height: 56px;
   background: linear-gradient(135deg,#0F766E,#14B8A6);
   border-radius: 50%;
   box-shadow: 0 8px 24px rgba(0,0,0,.15);
   display: flex; align-items: center; justify-content: center;
-  color: #fff; font-size: 30px; cursor: pointer; z-index: 1000;
+  color: #fff; font-size: 28px; cursor: pointer; z-index: 1000;
 }
 
 /* Chat panel */
 #nurse-panel {
   position: fixed;
-  right: 22px; bottom: 98px;
+  right: 20px; bottom: 86px;
   width: 420px; max-width: 92vw; height: 520px;
   background: #ffffff; border-radius: 14px;
-  box-shadow: 0 10px 36px rgba(0,0,0,.18);
+  box-shadow: 0 12px 36px rgba(0,0,0,.18);
   overflow: hidden; z-index: 999;
   border: 1px solid rgba(15,118,110,.10);
 }
 
 .nurse-header {
   background: linear-gradient(135deg,#0F766E,#14B8A6);
-  color: #fff; padding: 12px 16px; font-weight: 700;
-  display: flex; align-items: center; gap: 10px;
+  color: #fff; padding: 10px 14px; font-weight: 700;
+  display: flex; align-items: center; gap: 8px;
 }
 .nurse-header .avatar {
-  width: 28px; height: 28px; border-radius: 50%;
-  background: #fff2; display:flex; align-items:center; justify-content:center;
+  width: 26px; height: 26px; border-radius: 50%;
+  background: #ffffff22; display:flex; align-items:center; justify-content:center;
 }
 
 .nurse-body { padding: 12px 14px; height: 360px; overflow-y: auto; }
@@ -57,7 +59,9 @@ st.markdown("""
 }
 .nurse-user .nurse-bubble   { background:#E6FFFA; color:#0F766E; }
 .nurse-bot .nurse-bubble    { background:#F7F7F9; }
-.nurse-footer { padding: 12px; border-top: 1px solid #eee; background:#fff; }
+
+.nurse-footer { padding: 10px; border-top: 1px solid #eee; background:#fff; }
+.nurse-note { font-size: 12px; color:#4b5563; margin-top:6px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -101,30 +105,50 @@ SYSTEM_PROMPT = """You are an empathetic health information assistant.
 - End with a brief, actionable next step when possible.
 """
 
-# ---------- App header ----------
+# ---------- Header ----------
 col1, col2, col3 = st.columns([1,2,1])
 with col2:
     st.markdown("## 🩺 **Nurse Next AI (Educational)**")
     st.caption("This tool provides general educational health information only. It is NOT a substitute for professional medical advice. For emergencies, call your local emergency number.")
+
+# ---------- Sidebar toggle ----------
+if "chat_open" not in st.session_state:
+    st.session_state.chat_open = True
+st.sidebar.markdown("### Chat")
+if st.sidebar.button("Toggle chat", use_container_width=True):
+    st.session_state.chat_open = not st.session_state.chat_open
 
 # ---------- Chat state ----------
 if "history" not in st.session_state:
     st.session_state.history = [
         {"role":"assistant", "content":"Hi! I can share general health information. What can I help you with today?"}
     ]
-if "chat_open" not in st.session_state:
-    st.session_state.chat_open = True
 
-# ---------- Floating fab + panel toggle ----------
+# ---------- Helper: call model safely ----------
+def call_model(messages):
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.2,
+        )
+        return resp.choices[0].message.content
+    except AuthenticationError:
+        return ("Your OpenAI API key seems invalid or missing. "
+                "Open the menu (⋯ → Settings → Secrets) and set `OPENAI_API_KEY`, then rerun.")
+    except RateLimitError:
+        return ("The model is temporarily rate-limited. Please wait a moment and try again.")
+    except APIError as e:
+        return f"Upstream model error: {getattr(e, 'message', 'unexpected error')}"
+    except Exception as e:
+        return f"Upstream model error: {e}"
+
+# ---------- Floating button + Panel ----------
 fab_col = st.empty()
 panel = st.empty()
 
 with fab_col.container():
     st.markdown('<div id="nurse-fab">👩‍⚕️</div>', unsafe_allow_html=True)
-    # Fake click via a tiny form button – Streamlit reruns each click
-    open_close = st.button(("Hide chat" if st.session_state.chat_open else "Open chat"), key="toggle_chat")
-    if open_close:
-        st.session_state.chat_open = not st.session_state.chat_open
 
 if st.session_state.chat_open:
     with panel.container():
@@ -132,38 +156,26 @@ if st.session_state.chat_open:
         st.markdown('<div class="nurse-header"><div class="avatar">👩‍⚕️</div> Nurse Next</div>', unsafe_allow_html=True)
         st.markdown('<div class="nurse-body">', unsafe_allow_html=True)
 
-        # Render chat messages
+        # Render chat
         for m in st.session_state.history[-50:]:
             who = "nurse-user" if m["role"] == "user" else "nurse-bot"
             st.markdown(f'<div class="nurse-msg {who}"><div class="nurse-bubble">{m["content"]}</div></div>', unsafe_allow_html=True)
 
         st.markdown('</div>', unsafe_allow_html=True)  # close body
+        st.markdown('<div class="nurse-footer">', unsafe_allow_html=True)
 
-        # Footer input
-        with st.container():
-            st.markdown('<div class="nurse-footer">', unsafe_allow_html=True)
-            user_input = st.chat_input("Type your question…")
-            st.markdown('</div>', unsafe_allow_html=True)
+        user_input = st.chat_input("Type your question…")
+        if user_input:
+            st.session_state.history.append({"role":"user","content":user_input})
+            if needs_emergency_escalation(user_input):
+                reply = EMERGENCY_MSG
+            elif needs_refusal(user_input):
+                reply = REFUSAL_MSG
+            else:
+                messages = [{"role":"system","content": SYSTEM_PROMPT}] + st.session_state.history[-10:]
+                reply = call_model(messages)
+            st.session_state.history.append({"role":"assistant","content":reply})
+            st.rerun()
 
-            if user_input:
-                st.session_state.history.append({"role":"user","content":user_input})
-                if needs_emergency_escalation(user_input):
-                    reply = EMERGENCY_MSG
-                elif needs_refusal(user_input):
-                    reply = REFUSAL_MSG
-                else:
-                    messages = [{"role":"system","content": SYSTEM_PROMPT}] + st.session_state.history[-10:]
-                    try:
-                        resp = client.chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=messages,
-                            temperature=0.2
-                        )
-                        reply = resp.choices[0].message.content
-                    except Exception as e:
-                        reply = f"Upstream model error: {e}"
-
-                st.session_state.history.append({"role":"assistant","content":reply})
-                st.rerun()  # re-render chat immediately
-
-        st.markdown('</div>', unsafe_allow_html=True)  # close panel
+        st.markdown('<div class="nurse-note">This chatbot is for general education only.</div>', unsafe_allow_html=True)
+        st.markdown('</div></div>', unsafe_allow_html=True)  # close footer & panel
