@@ -7,9 +7,10 @@ from openai import AuthenticationError, RateLimitError, APIError
 st.set_page_config(page_title="Nurse Next AI (Educational)", page_icon="🩺", layout="wide")
 
 # ---------- Secrets / API key ----------
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))
+# Works with Streamlit Secrets or a local env var
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    st.error("OPENAI_API_KEY not found. Add it in Streamlit Secrets (⋯ → Settings → Secrets).")
+    st.error("OPENAI_API_KEY not found. Add it in Streamlit Secrets (⋯ → Settings → Secrets) or as an environment variable.")
     st.stop()
 
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -159,7 +160,10 @@ if st.session_state.chat_open:
         # Render chat
         for m in st.session_state.history[-50:]:
             who = "nurse-user" if m["role"] == "user" else "nurse-bot"
-            st.markdown(f'<div class="nurse-msg {who}"><div class="nurse-bubble">{m["content"]}</div></div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="nurse-msg {who}"><div class="nurse-bubble">{m["content"]}</div></div>',
+                unsafe_allow_html=True
+            )
 
         st.markdown('</div>', unsafe_allow_html=True)  # close body
         st.markdown('<div class="nurse-footer">', unsafe_allow_html=True)
