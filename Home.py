@@ -1,4 +1,4 @@
-import os, re
+import os, re, time, random
 import streamlit as st
 from openai import OpenAI
 from openai import AuthenticationError, RateLimitError, APIError
@@ -7,7 +7,6 @@ from openai import AuthenticationError, RateLimitError, APIError
 st.set_page_config(page_title="Nurse Next AI (Educational)", page_icon="🩺", layout="wide")
 
 # ---------- Secrets / API key ----------
-# Works with Streamlit Secrets or a local env var
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY not found. Add it in Streamlit Secrets (⋯ → Settings → Secrets) or as an environment variable.")
@@ -18,10 +17,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # ---------- Styles ----------
 st.markdown("""
 <style>
-/* Floating chat button */
+/* Floating chat button (raised to avoid Streamlit Cloud controls) */
 #nurse-fab {
   position: fixed;
-  right: 20px; bottom: 20px;
+  right: 20px; bottom: 96px;      /* was 20px */
   width: 56px; height: 56px;
   background: linear-gradient(135deg,#0F766E,#14B8A6);
   border-radius: 50%;
@@ -30,10 +29,10 @@ st.markdown("""
   color: #fff; font-size: 28px; cursor: pointer; z-index: 1000;
 }
 
-/* Chat panel */
+/* Chat panel (raised too) */
 #nurse-panel {
   position: fixed;
-  right: 20px; bottom: 86px;
+  right: 20px; bottom: 166px;     /* was 86px */
   width: 420px; max-width: 92vw; height: 520px;
   background: #ffffff; border-radius: 14px;
   box-shadow: 0 12px 36px rgba(0,0,0,.18);
@@ -59,7 +58,7 @@ st.markdown("""
   max-width: 95%;
 }
 .nurse-user .nurse-bubble   { background:#E6FFFA; color:#0F766E; }
-.nurse-bot .nurse-bubble    { background:#F7F7F9; }
+.nurse-bot  .nurse-bubble   { background:#F7F7F9; }
 
 .nurse-footer { padding: 10px; border-top: 1px solid #eee; background:#fff; }
 .nurse-note { font-size: 12px; color:#4b5563; margin-top:6px;}
@@ -79,11 +78,15 @@ BANNED_PATTERNS = [
     r"\b(prescribe|prescription|controlled substances?)\b",
     r"\b(dose|dosage)\b.*\b(baby|infant|newborn|pregnan\w*)",
 ]
-EMERGENCY_MSG = ("If you’re experiencing symptoms like chest pain, trouble breathing, stroke signs, "
-                 "severe bleeding, anaphylaxis, or thoughts of self-harm, call your local emergency "
-                 "number immediately. I can only provide general educational information, not medical advice.")
-REFUSAL_MSG = ("I can’t help with that request. I’m not a clinician and can’t provide dosing, prescriptions, "
-               "or controlled-substance guidance. I can share general educational information instead.")
+EMERGENCY_MSG = (
+    "If you’re experiencing symptoms like chest pain, trouble breathing, stroke signs, "
+    "severe bleeding, anaphylaxis, or thoughts of self-harm, call your local emergency "
+    "number immediately. I can only provide general educational information, not medical advice."
+)
+REFUSAL_MSG = (
+    "I can’t help with that request. I’m not a clinician and can’t provide dosing, prescriptions, "
+    "or controlled-substance guidance. I can share general educational information instead."
+)
 
 def needs_emergency_escalation(text: str) -> bool:
     t = (text or "").lower()
@@ -122,27 +125,37 @@ if st.sidebar.button("Toggle chat", use_container_width=True):
 # ---------- Chat state ----------
 if "history" not in st.session_state:
     st.session_state.history = [
-        {"role":"assistant", "content":"Hi! I can share general health information. What can I help you with today?"}
+        {"role": "assistant", "content": "Hi! I can share general health information. What can I help you with today?"}
     ]
 
-# ---------- Helper: call model safely ----------
+# ---------- Helper: call model with retry/backoff ----------
 def call_model(messages):
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.2,
-        )
-        return resp.choices[0].message.content
-    except AuthenticationError:
-        return ("Your OpenAI API key seems invalid or missing. "
-                "Open the menu (⋯ → Settings → Secrets) and set `OPENAI_API_KEY`, then rerun.")
-    except RateLimitError:
-        return ("The model is temporarily rate-limited. Please wait a moment and try again.")
-    except APIError as e:
-        return f"Upstream model error: {getattr(e, 'message', 'unexpected error')}"
-    except Exception as e:
-        return f"Upstream model error: {e}"
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.2,
+            )
+            return resp.choices[0].message.content
+        except AuthenticationError:
+            return ("Your OpenAI API key seems invalid or missing. "
+                    "Open the menu (⋯ → Settings → Secrets) and set `OPENAI_API_KEY`, then rerun.")
+        except RateLimitError:
+            if attempt < max_attempts - 1:
+                # exponential backoff + jitter
+                time.sleep((2 ** attempt) + random.uniform(0, 0.5))
+                continue
+            return ("The model is temporarily rate-limited. Please wait a moment and try again.")
+        except APIError as e:
+            # transient 5xx -> one retry
+            if attempt < max_attempts - 1:
+                time.sleep(1.5)
+                continue
+            return f"Upstream model error: {getattr(e, 'message', 'unexpected error')}"
+        except Exception as e:
+            return f"Upstream model error: {e}"
 
 # ---------- Floating button + Panel ----------
 fab_col = st.empty()
@@ -170,16 +183,19 @@ if st.session_state.chat_open:
 
         user_input = st.chat_input("Type your question…")
         if user_input:
-            st.session_state.history.append({"role":"user","content":user_input})
+            st.session_state.history.append({"role": "user", "content": user_input})
             if needs_emergency_escalation(user_input):
                 reply = EMERGENCY_MSG
             elif needs_refusal(user_input):
                 reply = REFUSAL_MSG
             else:
-                messages = [{"role":"system","content": SYSTEM_PROMPT}] + st.session_state.history[-10:]
+                messages = [{"role": "system", "content": SYSTEM_PROMPT}] + st.session_state.history[-10:]
                 reply = call_model(messages)
-            st.session_state.history.append({"role":"assistant","content":reply})
+            st.session_state.history.append({"role": "assistant", "content": reply})
             st.rerun()
 
         st.markdown('<div class="nurse-note">This chatbot is for general education only.</div>', unsafe_allow_html=True)
         st.markdown('</div></div>', unsafe_allow_html=True)  # close footer & panel
+else:
+    # ensure any previously rendered panel is removed
+    panel.empty()
