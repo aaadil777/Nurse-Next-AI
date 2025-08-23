@@ -4,7 +4,7 @@ from openai import OpenAI
 from openai import AuthenticationError, RateLimitError, APIError
 
 # ---------- Page setup ----------
-st.set_page_config(page_title="Nurse Next AI (Educational)", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Nurse Next AI", page_icon="🩺", layout="wide")
 
 # ---------- Secrets / API key ----------
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
@@ -112,7 +112,7 @@ SYSTEM_PROMPT = """You are an empathetic health information assistant.
 # ---------- Header ----------
 col1, col2, col3 = st.columns([1,2,1])
 with col2:
-    st.markdown("## 🩺 **Nurse Next AI (Educational)**")
+    st.markdown("## 🩺 **Nurse Next AI**")
     st.caption("This tool provides general educational health information only. It is NOT a substitute for professional medical advice. For emergencies, call your local emergency number.")
 
 # ---------- Sidebar toggle ----------
