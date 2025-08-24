@@ -1,5 +1,4 @@
 # Home.py
-
 import os, re, time, random
 import streamlit as st
 from openai import OpenAI
@@ -8,15 +7,69 @@ from openai import AuthenticationError, RateLimitError, APIError
 # ---------- Page setup ----------
 st.set_page_config(page_title="Nurse Next AI", page_icon="🩺", layout="wide")
 
-# ---------- Secrets / API key ----------
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    st.error("OPENAI_API_KEY not found. Add it in Streamlit Secrets (⋯ → Settings → Secrets) or as an environment variable.")
-    st.stop()
+# ---------- Provider selection ----------
+# AI_PROVIDER in { "openai", "groq", "openrouter" }
+PROVIDER = (st.secrets.get("AI_PROVIDER") or os.getenv("AI_PROVIDER") or "openai").lower()
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+def make_client_and_model():
+    """
+    Creates a single OpenAI-compatible client for the selected provider
+    and returns (client, model_name).
+    """
+    app_url = st.secrets.get("APP_URL") or os.getenv("APP_URL") or "https://nurse-next-ai.streamlit.app"
+
+    if PROVIDER == "groq":
+        # Groq: OpenAI-compatible endpoint
+        groq_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+        if not groq_key:
+            st.error("GROQ_API_KEY not found. Add it in Streamlit Secrets.")
+            st.stop()
+        base_url = "https://api.groq.com/openai/v1"
+        model = st.secrets.get("GROQ_MODEL") or os.getenv("GROQ_MODEL") or "llama3-70b-8192"
+        client = OpenAI(
+            api_key=groq_key,
+            base_url=base_url,
+            # headers not required for Groq, but allowed
+        )
+        return client, model
+
+    if PROVIDER == "openrouter":
+        # OpenRouter: OpenAI-compatible endpoint
+        or_key = st.secrets.get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+        if not or_key:
+            st.error("OPENROUTER_API_KEY not found. Add it in Streamlit Secrets.")
+            st.stop()
+        base_url = "https://openrouter.ai/api/v1"
+        model = st.secrets.get("OPENROUTER_MODEL") or os.getenv("OPENROUTER_MODEL") or "openrouter/auto"
+        # OpenRouter encourages including referer + title
+        client = OpenAI(
+            api_key=or_key,
+            base_url=base_url,
+            default_headers={
+                "HTTP-Referer": app_url,
+                "X-Title": "Nurse Next AI",
+            },
+        )
+        return client, model
+
+    # Default: OpenAI
+    oa_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not oa_key:
+        st.error(
+            "OPENAI_API_KEY not found. Set AI_PROVIDER to 'groq' or 'openrouter' with an API key, "
+            "or add your OpenAI key in Streamlit Secrets."
+        )
+        st.stop()
+    model = st.secrets.get("OPENAI_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+    client = OpenAI(api_key=oa_key)
+    return client, model
+
+client, MODEL = make_client_and_model()
 
 # ---------- Styles ----------
+# Hide the floating side-panel (the big white rectangle) by default.
+USE_FLOATING_PANEL = False  # set True if you want the floating panel back
+
 st.markdown("""
 <style>
 /* Floating chat button (raised to avoid Streamlit Cloud controls) */
@@ -31,7 +84,7 @@ st.markdown("""
   color: #fff; font-size: 28px; cursor: pointer; z-index: 1000;
 }
 
-/* Chat panel (raised too) */
+/* Chat panel (disabled unless USE_FLOATING_PANEL=True) */
 #nurse-panel {
   position: fixed;
   right: 20px; bottom: 166px;
@@ -41,7 +94,6 @@ st.markdown("""
   overflow: hidden; z-index: 999;
   border: 1px solid rgba(15,118,110,.10);
 }
-
 .nurse-header {
   background: linear-gradient(135deg,#0F766E,#14B8A6);
   color: #fff; padding: 10px 14px; font-weight: 700;
@@ -51,7 +103,6 @@ st.markdown("""
   width: 26px; height: 26px; border-radius: 50%;
   background: #ffffff22; display:flex; align-items:center; justify-content:center;
 }
-
 .nurse-body { padding: 12px 14px; height: 360px; overflow-y: auto; }
 .nurse-msg { margin: 8px 0; }
 .nurse-user   { text-align: right; }
@@ -61,11 +112,14 @@ st.markdown("""
 }
 .nurse-user .nurse-bubble   { background:#E6FFFA; color:#0F766E; }
 .nurse-bot  .nurse-bubble   { background:#F7F7F9; }
-
 .nurse-footer { padding: 10px; border-top: 1px solid #eee; background:#fff; }
 .nurse-note { font-size: 12px; color:#4b5563; margin-top:6px;}
 </style>
 """, unsafe_allow_html=True)
+
+if not USE_FLOATING_PANEL:
+    # Nuke the white box if CSS somehow renders it
+    st.markdown("<style>#nurse-panel{display:none!important;}</style>", unsafe_allow_html=True)
 
 # ---------- Guardrails ----------
 EMERGENCY_PATTERNS = [
@@ -119,9 +173,7 @@ with col2:
 
 # ---------- Sidebar toggle ----------
 if "chat_open" not in st.session_state:
-    # closed by default to avoid the white panel on load
-    st.session_state.chat_open = False
-
+    st.session_state.chat_open = True
 st.sidebar.markdown("### Chat")
 if st.sidebar.button("Toggle chat", use_container_width=True):
     st.session_state.chat_open = not st.session_state.chat_open
@@ -132,76 +184,61 @@ if "history" not in st.session_state:
         {"role": "assistant", "content": "Hi! I can share general health information. What can I help you with today?"}
     ]
 
-# ---------- Model calling with fallback & better messages ----------
-FALLBACK_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]  # tries in order
-
-def call_model_with_fallback(messages):
-    last_error = None
-    for i, model in enumerate(FALLBACK_MODELS):
+# ---------- Helper: call model with retry/backoff ----------
+def call_model(messages):
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
             resp = client.chat.completions.create(
-                model=model,
+                model=MODEL,
                 messages=messages,
                 temperature=0.2,
             )
             return resp.choices[0].message.content
         except AuthenticationError:
-            return ("Your OpenAI API key seems invalid or missing. "
-                    "Open the menu (⋯ → Settings → Secrets) and set `OPENAI_API_KEY`, then rerun.")
-        except RateLimitError as e:
-            # explicit quota message
-            return (f"Rate limit on **{model}**: {e}. "
-                    "If this says `insufficient_quota`, add billing/credits to your OpenAI project or wait and try again.")
-        except APIError as e:
-            last_error = e
-            # light retry for transient 5xx
-            time.sleep(1.2)
-        except Exception as e:
-            last_error = e
-    # ran out of models
-    return f"Upstream model error: {last_error or 'unexpected error'}"
-
-# ---------- Floating button + Panel ----------
-fab_col = st.empty()
-panel = st.empty()
-
-# Render the FAB always (it’s small and helps discovery)
-with fab_col.container():
-    st.markdown('<div id="nurse-fab">👩‍⚕️</div>', unsafe_allow_html=True)
-
-# Only render the panel when open (prevents the white ghost box)
-if st.session_state.chat_open:
-    with panel.container():
-        st.markdown('<div id="nurse-panel">', unsafe_allow_html=True)
-        st.markdown('<div class="nurse-header"><div class="avatar">👩‍⚕️</div> Nurse Next</div>', unsafe_allow_html=True)
-        st.markdown('<div class="nurse-body">', unsafe_allow_html=True)
-
-        # Render chat
-        for m in st.session_state.history[-50:]:
-            who = "nurse-user" if m["role"] == "user" else "nurse-bot"
-            st.markdown(
-                f'<div class="nurse-msg {who}"><div class="nurse-bubble">{m["content"]}</div></div>',
-                unsafe_allow_html=True
+            return (
+                f"Your {PROVIDER} API key seems invalid or missing. "
+                "Open the menu (⋯ → Settings → Secrets), set the correct key, then rerun."
             )
+        except RateLimitError:
+            if attempt < max_attempts - 1:
+                time.sleep((2 ** attempt) + random.uniform(0, 0.5))
+                continue
+            return (
+                f"Rate limit on **{MODEL}**. "
+                "If this says `insufficient_quota`, add credits to your API project or switch provider in Secrets."
+            )
+        except APIError as e:
+            if attempt < max_attempts - 1:
+                time.sleep(1.5)
+                continue
+            return f"Upstream model error: {getattr(e, 'message', str(e))}"
+        except Exception as e:
+            return f"Upstream model error: {e}"
 
-        st.markdown('</div>', unsafe_allow_html=True)  # close body
-        st.markdown('<div class="nurse-footer">', unsafe_allow_html=True)
+# ---------- Floating button (panel disabled by default) ----------
+st.markdown('<div id="nurse-fab">👩‍⚕️</div>', unsafe_allow_html=True)
 
-        user_input = st.chat_input("Type your question…")
-        if user_input:
-            st.session_state.history.append({"role": "user", "content": user_input})
-            if needs_emergency_escalation(user_input):
-                reply = EMERGENCY_MSG
-            elif needs_refusal(user_input):
-                reply = REFUSAL_MSG
-            else:
-                messages = [{"role": "system", "content": SYSTEM_PROMPT}] + st.session_state.history[-10:]
-                reply = call_model_with_fallback(messages)
-            st.session_state.history.append({"role": "assistant", "content": reply})
-            st.rerun()
+# ---------- Main-page chat ----------
+# (This is the one you see — the floating panel is disabled to avoid the white box.)
+st.divider()
+user_input = st.chat_input("Type your question…")
 
-        st.markdown('<div class="nurse-note">This chatbot is for general education only.</div>', unsafe_allow_html=True)
-        st.markdown('</div></div>', unsafe_allow_html=True)  # close footer & panel
-else:
-    # ensure any previously rendered panel is removed
-    panel.empty()
+# Render history
+for m in st.session_state.history[-50:]:
+    with st.chat_message("user" if m["role"] == "user" else "assistant"):
+        st.markdown(m["content"])
+
+if user_input:
+    st.session_state.history.append({"role": "user", "content": user_input})
+    if needs_emergency_escalation(user_input):
+        reply = EMERGENCY_MSG
+    elif needs_refusal(user_input):
+        reply = REFUSAL_MSG
+    else:
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + st.session_state.history[-10:]
+        reply = call_model(messages)
+    st.session_state.history.append({"role": "assistant", "content": reply})
+    st.rerun()
+
+st.caption("This chatbot is for general education only.")
